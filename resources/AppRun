@@ -1,0 +1,5 @@
+#!/bin/sh
+# Entry point of the Zoom AppImage. ZoomLauncher sets LD_LIBRARY_PATH for the
+# bundled libraries itself and restarts zoom when it asks to relaunch.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/zoom/ZoomLauncher" "$@"

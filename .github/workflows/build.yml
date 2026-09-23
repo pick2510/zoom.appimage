@@ -1,0 +1,78 @@
+name: Build AppImage
+
+on:
+  schedule:
+    - cron: "17 5 * * *"  # daily: pick up new Zoom releases
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Zoom version to build (empty = latest)"
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - build.sh
+      - resources/**
+      - .github/workflows/build.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine Zoom version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="$INPUT_VERSION"
+          if [ -z "$VERSION" ]; then
+            # zoom.us/client/latest redirects to cdn.zoom.us/prod/<version>/...
+            URL="$(curl -fsSIL -o /dev/null -w '%{url_effective}' \
+              https://zoom.us/client/latest/zoom_x86_64.tar.xz)"
+            VERSION="$(basename "$(dirname "$URL")")"
+          fi
+          [[ "$VERSION" =~ ^[0-9.]+$ ]] || { echo "Bad version: $VERSION" >&2; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          RELEASED=false
+          gh release view "v$VERSION" >/dev/null 2>&1 && RELEASED=true
+          echo "released=$RELEASED" >> "$GITHUB_OUTPUT"
+          echo "Zoom $VERSION, already released: $RELEASED"
+
+      # Scheduled runs only build when Zoom published a version we have not released yet.
+      - name: Build
+        id: build
+        if: github.event_name != 'schedule' || steps.version.outputs.released == 'false'
+        env:
+          ZOOM_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ./build.sh
+          echo "file=Zoom-$ZOOM_VERSION-x86_64.AppImage" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        if: steps.build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zoom-${{ steps.version.outputs.version }}-x86_64.AppImage
+          path: |
+            ${{ steps.build.outputs.file }}
+            ${{ steps.build.outputs.file }}.zsync
+          compression-level: 0
+
+      - name: Publish release
+        if: steps.build.outcome == 'success' && steps.version.outputs.released == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          FILE: ${{ steps.build.outputs.file }}
+          # Only the current Zoom version may become "latest": Gear Lever updates to it.
+          LATEST: ${{ inputs.version == '' }}
+        run: |
+          gh release create "v$VERSION" "$FILE" "$FILE.zsync" --latest="$LATEST" \
+            --title "Zoom $VERSION" \
+            --notes "Zoom $VERSION for Linux, repackaged as an AppImage from the official zoom_x86_64.tar.xz."
